@@ -517,7 +517,7 @@ def metadata_refactor(metadata: dict) -> dict:
             ExifTool_ExifIFD_FocalPlaneYResolution = NestedDict.get(ExifTool_ExifIFD, "FocalPlaneYResolution")
             ExifTool_InteropIFD_RelatedImageHeight = NestedDict.get(ExifTool_InteropIFD, "RelatedImageHeight")
             NestedDict.set(ExifTool_ExifIFD, "ExifImageHeight", ExifTool_InteropIFD_RelatedImageHeight)
-            NestedDict.set(ExifTool_ExifIFD, "FocalPlaneXResolution", ExifTool_ExifIFD_FocalPlaneYResolution * (ExifTool_InteropIFD_RelatedImageHeight / ExifTool_ExifIFD_ExifImageHeight))
+            NestedDict.set(ExifTool_ExifIFD, "FocalPlaneYResolution", ExifTool_ExifIFD_FocalPlaneYResolution * (ExifTool_InteropIFD_RelatedImageHeight / ExifTool_ExifIFD_ExifImageHeight))
 
     #ExifTool.Canon
     ExifTool_Canon = NestedDict.pop(metadata, ("ExifTool", "Canon"))
