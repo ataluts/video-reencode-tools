@@ -10,14 +10,15 @@ from datetime import datetime
 from collections import defaultdict
 from typing import Any
 import xml.etree.ElementTree as ElementTree
+from dataclasses import dataclass, field
 
-_module_date     = datetime(2026, 7, 19)
+_module_date     = datetime(2026, 7, 20)
 _module_designer = "Alexander Taluts"
 _halt_on_exit    = True
 _debug           = False
 
 PRESET_GPS = { #'preset': (±lat, ±lon[, ±alt[, 'areaname']])
-    "home": (0.000000, 0.000000, None, "Home")
+    #"home": (0.000000, 0.000000, None, "Home")
 }
 
 PRESET_LENS = {
@@ -66,6 +67,7 @@ PRESET_LENS = {
     }
 }
 
+FILENAME_PREFIX_LENGTH = 8
 CMD_INDENT = " " * 4
 
 #External executables path
@@ -120,6 +122,27 @@ class NestedDict():
         for key, value in d.items():
             if isinstance(value, dict): NestedDict.replace_value(value, old, new)
             elif value == old: d[key] = new
+
+@dataclass
+class MKV:
+    @dataclass
+    class Attachment:
+        name        : str   = ""
+        mimetype    : str   = ""
+        description : str   = ""
+        path        : Path  = Path("")
+
+    container   : Path  = Path("")
+    tags        : Path  = Path("")
+    attachments : list[Attachment] = field(default_factory=list)
+
+    def validate(self) -> tuple(bool, str):
+        if not self.container.is_file(): return False, "container file is missing."
+        if not self.tags.is_file(): return False, "tags file is missing."
+        for file in self.attachments:
+            if not file.path.is_file(): return False, f"attachment {file} is missing."
+            if not file.name: return False, f"attachment {file} has no name."
+        return True, ""
 
 #Exits the program
 def exit(code:int = 0) -> None:
@@ -418,19 +441,27 @@ def metadata_save(files: dict, compression: int | None = None, zip_path: Path | 
 
 
 #Inserts metadada into MKV file
-def metadata_insert_mkv(file_mkv: Path, file_xml: Path, file_zip: Path, mkvpropedit_path: Path = None) -> None:
+def metadata_insert_mkv(container: Path, tags: Path = None, attachments: list[MKV.Attachment] = None, mkvpropedit_path: Path = None) -> None:
     if mkvpropedit_path is None: mkvpropedit_path = mkvpropedit_exe
-    if not (file_mkv.exists() and file_xml.exists() and file_zip.exists()):
-        raise FileNotFoundError()
+    if not container.is_file(): raise FileNotFoundError(str(container))
     
-    cmd = [str(mkvpropedit_path), str(file_mkv), "--tags", f'global:{file_xml}', "--attachment-name", "source_metadata.zip", "--attachment-mime-type", "application/zip", "--attachment-description", "Source metadata archive", "--add-attachment", str(file_zip)]
-
+    cmd = [str(mkvpropedit_path), str(container)]
+    if tags is not None:
+        if not tags.is_file(): raise FileNotFoundError(str(tags))
+        cmd.extend(["--tags", f'global:{tags}'])
+    if attachments is not None:
+        for attachment in attachments:
+            if not attachment.path.is_file(): raise FileNotFoundError(str(attachment.path))
+            if attachment.name: cmd.extend(["--attachment-name", attachment.name])
+            if attachment.mimetype: cmd.extend(["--attachment-mime-type", attachment.mimetype])
+            if attachment.description: cmd.extend(["--attachment-description", attachment.description])
+            cmd.extend(["--add-attachment", str(attachment.path)])
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60, encoding="utf-8", errors="replace")
         print(result.stdout)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
-            f"mkvpropedit failed for {file_mkv}\n"
+            f"mkvpropedit failed for {container}\n"
             f"stderr:\n{e.stderr}"
         )
 
@@ -464,7 +495,7 @@ def metadata_refactor(metadata: dict) -> dict:
         ExifTool_IFD0_out = {}
         if "Make" in ExifTool_IFD0_in: ExifTool_IFD0_out["Make"] = ExifTool_IFD0_in["Make"]
         if "Model" in ExifTool_IFD0_in: ExifTool_IFD0_out["Model"] = ExifTool_IFD0_in["Model"]
-        ExifTool_IFD0_out["DocumentName"] = NestedDict.get(result, ("ExifTool", "File", "Name"))[:8]
+        ExifTool_IFD0_out["DocumentName"] = NestedDict.get(result, ("ExifTool", "File", "Name"))[:FILENAME_PREFIX_LENGTH]
         if "Orientation" in ExifTool_IFD0_in: ExifTool_IFD0_out["Orientation"] = ExifTool_IFD0_in["Orientation"]
         user_ImageDescription = input(f"{CMD_INDENT}Add description [skip]: ").strip()
         if user_ImageDescription: ExifTool_IFD0_out["ImageDescription"] = user_ImageDescription
@@ -657,7 +688,7 @@ def metadata_refactor(metadata: dict) -> dict:
             gps_data = {}
             user_gps = input(f"{CMD_INDENT}GPS info is not present or invalid, add it manually {{±lat, ±lon[, ±alt[, areaname]]|'preset'}} [skip]: ").strip()
             if user_gps:
-                match = re.match(r"^\s*(?P<lat>[+-]?\d+(?:\.\d+)?)\s*,\s*(?P<lon>[+-]?\d+(?:\.\d+)?)(?:\s*,\s*(?P<alt>[+-]?\d+(?:\.\d+)?)(?:\s*,\s*'(?P<area>[^']*)')?)?\s*$", user_gps)
+                match = re.match(r"^\s*(?P<lat>[+-]?\d+(?:\.\d+)?)\s*,\s*(?P<lon>[+-]?\d+(?:\.\d+)?)(?:\s*,\s*(?P<alt>[+-]?\d+(?:\.\d+)?)?)?(?:\s*,\s*(?P<area>.+?))?\s*$", user_gps)
                 if match:
                     #user specified numeric coordinates
                     try:
@@ -744,10 +775,14 @@ def metadata_refactor(metadata: dict) -> dict:
     return result
 
 
-#Builds composite from metadata
-def composite_build(metadata: dict) -> dict:
+#Builds tags from metadata
+def tags_build(metadata: dict) -> dict:
     result = {}
-    
+    #EXIF -> Document name
+    document_name = NestedDict.get(metadata, ("ExifTool", "IFD0", "DocumentName"))
+    if document_name:
+        NestedDict.set(result, ("EXIF", "DocumentName"), document_name)
+
     #EXIF -> Description
     description = NestedDict.get(metadata, ("ExifTool", "IFD0", "ImageDescription"))
     if description:
@@ -1070,7 +1105,7 @@ def composite_build(metadata: dict) -> dict:
         NestedDict.set(result, ("Source", "Audio"), original_audio_str)
 
     #Source -> Metadata
-    NestedDict.set(result, ("Source", "Metadata"), "Full source video file metadata is in the attached ZIP archive.")
+    NestedDict.set(result, ("Source", "Metadata"), "Full source file metadata is in the attached ZIP archive.")
 
     return result
 
@@ -1094,13 +1129,14 @@ def main():
     #detect mode of operation
     input_extensions = {f.suffix.lower() for f in inputs}
     opmode_extract = (".mp4" in input_extensions or  ".json" in input_extensions)
-    opmode_insert  = (".mkv" in input_extensions and ".xml"  in input_extensions and ".zip" in input_extensions)
+    opmode_insert  = (".mkv" in input_extensions and ".xml"  in input_extensions)
 
     if opmode_extract and opmode_insert:
         raise ValueError("Input contains files belonging to both extraction and insertion mode.")
     
     if opmode_extract:
         #metadata extraction mode
+        print("Mode of operaton: extraction")
         input_extensions_allowed = {".mp4", ".json"}
         invalid = [
             ext for ext in input_extensions
@@ -1117,7 +1153,7 @@ def main():
         print("")
 
         for file in inputs:
-            print(f"Processing: {file}")
+            print(f'Processing: "{file}"')
             file_suffix = file.suffix.lower()
             metadata_dict = {}
             if file_suffix == ".mp4":
@@ -1135,20 +1171,22 @@ def main():
                 metadata_dict["ffprobe"]  = metadata_decode_ffprobe_stdout(file)
 
             metadata_dict = metadata_refactor(metadata_dict)
-            composite_dict = composite_build(metadata_dict)
+            tags_dict = tags_build(metadata_dict)
 
             metadata_json = metadata_encode_json(metadata_dict)
-            composite_xml = metadata_encode_mkvxml(composite_dict)
+            tags_xml = metadata_encode_mkvxml(tags_dict)
 
             metadata_files = {}
             if metadata_header_bin is not None:
                 metadata_files[file.with_name(file.name + ".header")] = metadata_header_bin
             if metadata_json is not None:
-                metadata_files[file.with_name(file.name + ".json")] = metadata_json
+                if file.suffix != ".json": filename = file.name + ".json"
+                else: filename = file.name
+                metadata_files[file.with_name(filename)] = metadata_json
             metadata_save(metadata_files, zipfile.ZIP_LZMA, file.with_name(file.stem + "_metadata.zip"))
 
-            composite_files = {file.with_name(file.stem + "_metadata.xml"): composite_xml}
-            metadata_save(composite_files, None)
+            tags_files = {file.with_name(file.stem + "_tags.xml"): tags_xml}
+            metadata_save(tags_files, None)
             
             print("")
 
@@ -1156,36 +1194,33 @@ def main():
 
     elif opmode_insert:
         #metadata insertion mode
-        #check input
-        input_extensions_allowed = {".mkv", ".xml", ".zip"}
-        invalid = [
-            ext for ext in input_extensions
-            if ext not in input_extensions_allowed
-        ]
-        if invalid:
-            raise ValueError(f"Invalid file types in insertion mode: {invalid}")
-
+        print("Mode of operaton: insertion")
         #group files
         groups = {}
         for file in inputs:
             ext = file.suffix.lower()
-            stem = str(file.parent) + "\\" + file.stem[:8]
-            if stem in groups:
-                if ext in groups[stem]:
-                    raise ValueError(f"Multiple '{ext}' files found for '{stem}'")
-                else:
-                    groups[stem][ext] = file
+            stem = str(file.with_name(file.name[:FILENAME_PREFIX_LENGTH]))
+            if stem in groups: mkv = groups[stem]
+            else:              mkv = MKV()
+            if   ext == ".mkv":
+                mkv.container = file
+            elif ext == ".xml" and file.stem.endswith("_tags"):
+                mkv.tags = file
+            elif ext == ".zip" and file.stem.endswith("_metadata"):
+                mkv.attachments.append(MKV.Attachment(name="metadata.zip", mimetype="application/zip", description="Source metadata archive", path=file))
             else:
-                groups[stem] = {ext: file}
+                name = file.name[FILENAME_PREFIX_LENGTH:].strip().strip('_')
+                if Path(name).stem != file.suffix:
+                    mkv.attachments.append(MKV.Attachment(name=name, path=file))
+                else:
+                    mkv.attachments.append(MKV.Attachment(name=file.name, path=file))
+            groups[stem] = mkv
 
         #validate groups
         for stem, group in groups.items():
-            missing = []
-            for required in [".mkv", ".xml", ".zip"]:
-                if required not in group:
-                    missing.append(required)
-            if missing:
-                raise ValueError(f"Group '{stem}' is missing: {', '.join(missing)}")
+            validate = group.validate()
+            if not validate[0]:
+                raise ValueError(f"Group '{stem}' is not valid: {validate[1]}")
 
         #insert metadata
         global mkvpropedit_exe, mkvextract_exe
@@ -1196,25 +1231,25 @@ def main():
         print("")
 
         for stem, group in groups.items():
-            print(f"Processing: {group['.mkv'].stem}")
-            print(f"{CMD_INDENT}MKV: {group['.mkv']}")
-            print(f"{CMD_INDENT}XML: {group['.xml']}")
-            print(f"{CMD_INDENT}ZIP: {group['.zip']}")
+            print(f"Processing: {Path(stem).name}")
+            print(f'{CMD_INDENT}container   : "{group.container}"')
+            print(f'{CMD_INDENT}tags        : "{group.tags}"')
+            print(f"""{CMD_INDENT}attachments : {"; ".join([f'"{attachment.path}"' for attachment in group.attachments])}""")
             #read tags that already exist in MKV file and discard generic Matroska tags
-            metadata_mkv = metadata_decode_mkvxml_stdout(group[".mkv"])
+            metadata_mkv = metadata_decode_mkvxml_stdout(group.container)
             metadata_old = {}
             for tag, value in metadata_mkv.items():
                 if not tag.isupper() and isinstance(value, dict):
                     metadata_old[tag] = value
             #read tags that exist in XML file
-            metadata_new = metadata_decode_mkvxml_file(group[".xml"])
+            metadata_new = metadata_decode_mkvxml_file(group.tags)
             #merge metadata
             metadata = metadata_old | metadata_new
             #save it to new temporary XML file
-            metadata_file = group[".xml"].with_suffix(".tmp")
+            metadata_file = group.tags.with_suffix(".tmp")
             metadata_save({metadata_file: metadata_encode_mkvxml(metadata)}, None)
             #insert merged metadata into MKV file
-            metadata_insert_mkv(group[".mkv"], metadata_file, group[".zip"])
+            metadata_insert_mkv(group.container, metadata_file, group.attachments)
             #delete temporary XML file
             metadata_file.unlink(missing_ok=True)
             print("")
