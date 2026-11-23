@@ -1,4 +1,4 @@
-import sys, argparse
+import sys, platform, argparse
 from datetime import datetime
 import time
 import json
@@ -153,7 +153,7 @@ def seconds_to_timestamp(seconds: float) -> str:
 
 
 # Run one 'ab-av1 sample-encode' command
-def abav1_run(cmd: list[str], log: Path = None) -> CRF:
+def abav1_run(cmd: list[str], cwd: Path, log: Path = None) -> CRF:
     time_start = time.monotonic()
     result = None
 
@@ -161,7 +161,18 @@ def abav1_run(cmd: list[str], log: Path = None) -> CRF:
         if log is not None: log_file = log.open("w", encoding="utf-8", newline="")
         else:               log_file = None
 
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1)
+        if cwd is not None: cwd = str(cwd)
+        else: cwd = ""
+
+        #set idle priority
+        popen_kwargs = {}
+        if platform.system() == "Windows":
+            popen_kwargs["creationflags"] = subprocess.IDLE_PRIORITY_CLASS
+        else:
+            popen_kwargs["preexec_fn"] = lambda: os.nice(19)
+
+
+        process = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1, **popen_kwargs)
         assert process.stdout is not None
         for line in process.stdout:
             print(line, end="")
@@ -339,11 +350,12 @@ def main():
                    "--crf", crf_to_str(crf),
                    "--samples", str(videofile.sample_number), "--sample-duration", videofile.sample_duration,
                    *ABAV1_OPTIONS]
+            cwd = videofile.path.parent
 
             if ABAV1_OUTPUT_LOG: log_file = videofile.path.with_name(f"{videofile.path.stem}_crf{crf}.log")
             else:                log_file = None
 
-            result = abav1_run(cmd, log_file)
+            result = abav1_run(cmd, cwd, log_file)
             result.bitrate = int((result.filesize * 8) / videofile.info.duration)
             videofile.results.append(result)
 

@@ -1,15 +1,17 @@
 import os, platform, sys, argparse
-import shutil, subprocess
+import shutil, sys, subprocess
 from pathlib import Path
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
+import re
+from enum import Enum
 from itertools import product
 import xml.etree.ElementTree as ElementTree
 
-_module_date     = datetime(2026, 7, 19)
+_module_date     = datetime(2026, 11, 23)
 _module_designer = "Alexander Taluts"
-_halt_on_exit    = True
+_halt_on_exit    = False
 _debug           = False
 
 #Configuration =================================================================================================================================================
@@ -23,28 +25,43 @@ ENCODER_PRESETS = {
         "-i", "%INPUT_FILE_PATH%",
         "-c:v", "libsvtav1", "-preset", "1", "-crf", ["Enter CRF value(s)", "27", "-crf?"], "-g", "300", "-r", "60000/1001", "-pix_fmt", "yuv420p", "-svtav1-params", "tune=0",
         "-c:a", "libopus", "-b:a", "128k", "-vbr", "on", "-application", "audio",
-        "%INPUT_FILE_PREFIX%_av1%PARAM_SUFFIX%.mkv"
+        "-f", "matroska", "%INPUT_FILE_PREFIX%_av1%PARAM_SUFFIX%.mkv"
     ],
-    "hevc_nvenc": [
+    "hevc": [
         "-n", "-hide_banner",
         "-i", "%INPUT_FILE_PATH%",
+        "-vf", "scale=in_range=pc:out_range=tv",
         "-c:v", "hevc_nvenc", "-preset", "p7", "-cq", ["Enter CQ value(s)", "25", "-cq?"], "-g", "300", "-r", "60000/1001", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k",
-        "%INPUT_FILE_PREFIX%_hevc-nvenc%PARAM_SUFFIX%.mkv"
+        "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "128k",
+        "-f", "matroska", "%INPUT_FILE_PREFIX%_hevc%PARAM_SUFFIX%.mkv"
+    ],
+    "ffv1": [
+        "-n", "-hide_banner",
+        "-f", "avisynth", "-i", "%INPUT_FILE_PATH%", "-i", "%INPUT_FILE_PREFIX%_filtered.flac", "-map", "0:v", "-map", "1:a",
+        "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p",
+        "-c:a", "flac", "-compression_level", "8", "-ac", "1",
+        "-f", "matroska", "%INPUT_FILE_PREFIX%_lossless.mkv"
     ],
     "lossless": [
         "-n", "-hide_banner",
-        "-i", "%INPUT_FILE_PATH%", "-i", "%INPUT_FILE_PREFIX%_filtered.flac", "-map", "0:v", "-map", "1:a",
-        "-c:v", "libx265", "-preset", "fast", "-x265-params", "lossless=1", "-r", "60000/1001", "-pix_fmt", "yuv420p", "-color_range", "pc", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+        "-f", "avisynth", "-i", "%INPUT_FILE_PATH%", "-i", "%INPUT_FILE_PREFIX%_filtered.flac", "-map", "0:v", "-map", "1:a",
+        "-c:v", "hevc_nvenc", "-preset", "p7", "-tune", "lossless", "-pix_fmt", "yuv420p",
         "-c:a", "flac", "-compression_level", "8", "-ac", "1",
-        "%INPUT_FILE_PREFIX%_lossless.mkv"
+        "-f", "matroska", "%INPUT_FILE_PREFIX%_lossless.mkv"
     ],
     "demux": [
         "-y", "-hide_banner",
-        "-i", "%INPUT_FILE_PATH%",
+        "-f", "avisynth", "-i", "%INPUT_FILE_PATH%",
         "-vn",
         "-acodec", "flac", "-compression_level", "8", "-ac", "1",
-        "%INPUT_FILE_PREFIX%.flac"
+        "-f", "flac", "%INPUT_FILE_PREFIX%.flac"
+    ],
+    "null": [
+        "-y", "-hide_banner",
+        "-f", "avisynth", "-i", "%INPUT_FILE_PATH%",
+        "-an",
+        "-f", "null",
+        "-"
     ]
 }
 #Encoder arguments excluded from metadata iserted into output file, ("argument_value", <number_of_arguments_to_exclude>), last argument (output_file) also excluded
@@ -52,6 +69,7 @@ ENCODER_METADATA_EXCLUDE = (
     ("-n", 1),
     ("-y", 1),
     ("-hide_banner", 1),
+    ("-f", 2),
     ("-i", 2), 
     ("-map", 2)
 )
@@ -60,6 +78,42 @@ FILENAME_PREFIX_LENGTH = 8
 CMD_INDENT             = " " * 4
 CMD_HEADER_WIDTH       = 119
 #===============================================================================================================================================================
+
+class JobsFinishedAction(Enum):
+    CLOSE       = "close"
+    HALT        = "halt"
+    EXECUTE     = "execute"
+    SHUTDOWN    = "shutdown"
+    RESTART     = "restart"
+    HIBERNATE   = "hibernate"
+    SLEEP       = "sleep"
+    LOCK        = "lock"
+    LOGOFF      = "logoff"
+
+if platform.system() == "Windows":
+    jobsfinished_commands = {
+        JobsFinishedAction.SHUTDOWN: ["shutdown", "/s", "/t", "60"],
+        JobsFinishedAction.RESTART: ["shutdown", "/r", "/t", "60"],
+        JobsFinishedAction.HIBERNATE: ["shutdown", "/h"],
+        JobsFinishedAction.LOCK: ["rundll32.exe", "user32.dll,LockWorkStation"],
+        JobsFinishedAction.LOGOFF: ["shutdown", "/l"],
+    }
+elif platform.system() == "Linux":
+    jobsfinished_commands = {
+        JobsFinishedAction.SHUTDOWN: ["systemctl", "poweroff"],
+        JobsFinishedAction.RESTART: ["systemctl", "reboot"],
+        JobsFinishedAction.HIBERNATE: ["systemctl", "hibernate"],
+        JobsFinishedAction.SLEEP: ["systemctl", "suspend"],
+        JobsFinishedAction.LOCK: ["loginctl", "lock-session"],
+    }
+elif platform.system() == "Darwin":
+    jobsfinished_commands = {
+        JobsFinishedAction.SHUTDOWN: ["shutdown", "-h", "now"],
+        JobsFinishedAction.RESTART: ["shutdown", "-r", "now"],
+        JobsFinishedAction.SLEEP: ["pmset", "sleepnow"],
+    }
+else:
+    jobsfinished_commands = {}
 
 #External executables path
 ffmpeg_exe = None
@@ -107,7 +161,7 @@ def find_exe(name: str, search_list: Path | list[Path] = None) -> Path:
     raise FileNotFoundError(f"'{name}' not found in supplied paths, script directory, or system PATH.")
 
 #Format time in seconds into string
-def timedelta(seconds: int|float) -> str:
+def sec_tostring(seconds: int|float) -> str:
     seconds = int(seconds)
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -188,23 +242,19 @@ def ffmpeg_encode(args: list(str), ffmpeg_path: Path = None) -> None:
 
 
 def main():
-    #parse call arguments
+    # Parse call arguments
     parser = argparse.ArgumentParser(description=f"video-reencode-tools:encoder v.{_module_date:%Y-%m-%d} by {_module_designer}.")
     parser.add_argument("inputs",       nargs="+", type=Path,                                 help="Input files (drag & drop supported)")
     parser.add_argument("--ffmpeg",                type=Path, default=None, metavar="<file>", help="Path to ffmpeg.")
     parser.add_argument("--mkvpropedit",           type=Path, default=None, metavar="<file>", help="Path to mkvpropedit.")
-    parser.add_argument('--nohalt',                action='store_true',                       help='Do not halt terminal when finished')
     args = parser.parse_args()
 
     inputs = [f.resolve() for f in args.inputs]
-    if args.nohalt: 
-        global _halt_on_exit
-        _halt_on_exit = False
 
     global ffmpeg_exe
     ffmpeg_exe = find_exe("ffmpeg", args.ffmpeg)
 
-    #acquire all necessary data
+    # Acquire encoding parameters
     print("Requesting encoding parameters ".ljust(CMD_HEADER_WIDTH, '='))
     encoding_preset = next(iter(ENCODER_PRESETS))
     while True:
@@ -219,37 +269,113 @@ def main():
     job_queue = []
     for file in inputs:
         print(f"{file.name}:")
-        #ask user for variable arguments values
+        # Ask user for variable arguments values
         job = deepcopy(ENCODER_PRESETS[encoding_preset])
         job_suffix = []
         for i, arg in enumerate(job):
             if isinstance(arg, (tuple, list)):
-                #argument is a list -> user input required
+                # Argument is a list -> user input required
                 user_input = input(f"{CMD_INDENT}{arg[0]} [{arg[1]}]: ").strip()
                 if not user_input:
                     user_input = arg[1]
                 job[i] = user_input.split(" ")
-                #expand value into job suffix
+                # Expand value into job suffix
                 arg_suffix = job[i].copy()
                 for i, value in enumerate(arg_suffix):
                     arg_suffix[i] = arg[2].replace("?", value)
                 job_suffix.append(arg_suffix)
             else:
-                #generic argument -> copy
+                # Generic argument -> copy
                 job[i] = [arg]
-        #generate a product of all combinations
+        # Generate a product of all combinations
         jobs = [list(job) for job in product(*job)]
         jobs_suffix = ["".join(job_suffix) for job_suffix in product(*job_suffix)]
-        #expand variables
+        # Expand variables
         for j, job in enumerate(jobs):
             for i, arg in enumerate(job):
                 job[i] = job[i].replace("%INPUT_FILE_PATH%", str(file))
                 job[i] = job[i].replace("%INPUT_FILE_PREFIX%", str(file.with_name(file.name[:FILENAME_PREFIX_LENGTH])))
                 job[i] = job[i].replace("%PARAM_SUFFIX%", jobs_suffix[j])
         job_queue.extend(jobs)
-    print("")
 
-    #processing jobs
+    # Acquire script parameters
+    print("")
+    print("Requesting script parameters ".ljust(CMD_HEADER_WIDTH, '='))
+    while True:
+        user_input = input("Do after jobs finished [halt]: ").strip().lower() or "halt"
+        try:
+            jobsfinished_action = JobsFinishedAction(user_input)
+            jobsfinished_command = ""
+            break
+        except ValueError:
+            if user_input.startswith("execute:") and user_input[8:].strip():
+                jobsfinished_action = JobsFinishedAction.EXECUTE
+                jobsfinished_command = user_input[8:].strip()
+                break
+            print(f"{CMD_INDENT}Invalid action. Available options: {', '.join(a.value for a in JobsFinishedAction)}")
+    while True:
+        wait_time = None
+        wait_delay = None
+        user_input = input("Enter job delay or start time [0s]: ").strip()
+        if not user_input:
+            break
+        try:
+            if user_input.startswith("@"):
+                # Absolute start time: @HH:MM or @HH:MM:SS
+                wait_time = user_input[1:].split(":")
+                if len(wait_time) not in (2, 3) or not all(p.isdigit() for p in wait_time):
+                    raise ValueError("Expected @HH:MM or @HH:MM:SS")
+                wait_time_h, wait_time_m = int(wait_time[0]), int(wait_time[1])
+                wait_time_s = int(wait_time[2]) if len(wait_time) == 3 else 0
+                if wait_time_h > 23 or wait_time_m > 59 or wait_time_s > 59:
+                    raise ValueError("Invalid time values")
+                now = datetime.now()
+                wait_time = now.replace(hour=wait_time_h, minute=wait_time_m, second=wait_time_s, microsecond=0)
+                if wait_time <= now:
+                    wait_time += timedelta(days=1)
+                break
+            elif ":" in user_input:
+                # Relative delay: HH:MM:SS
+                wait_delay = user_input.split(":")
+                if len(wait_delay) != 3 or not all(p.isdigit() for p in wait_delay):
+                    raise ValueError("Expected HH:MM:SS")
+                wait_delay_h, wait_delay_m, wait_delay_s = map(int, wait_delay)
+                if wait_delay_m > 59 or wait_delay_s > 59:
+                    raise ValueError("Invalid time values")
+                wait_delay = wait_delay_h * 3600 + wait_delay_m * 60 + wait_delay_s
+                break
+            else:
+                # Relative delay: integer + optional d/h/m/s
+                match = re.fullmatch(r"(\d+)\s*([dhms]?)", user_input.lower())
+                if not match:
+                    raise ValueError("Expected integer with optional d/h/m/s suffix")
+                wait_delay_value = int(match.group(1))
+                wait_delay_suffix = match.group(2)
+                wait_delay_multipliers = {"d": 86400, "h": 3600, "m": 60, "s": 1, "": 1}
+                wait_delay = wait_delay_value * wait_delay_multipliers[wait_delay_suffix]
+                break
+        except ValueError as e:
+            print(f"Invalid input: {e}")
+
+    # Wait to start jobs processing
+    if wait_time is not None or wait_delay is not None:
+        print("")
+        print("Waiting to start ".ljust(CMD_HEADER_WIDTH, '='))
+        if wait_delay is not None:
+            wait_until = time.monotonic() + wait_delay
+        while True:
+            if wait_time is not None:
+                wait_delay = (wait_time - datetime.now()).total_seconds()
+            else:
+                wait_delay = wait_until - time.monotonic()
+            if wait_delay <= 0:
+                break
+            print(f"\rJobs will start in: {sec_tostring(wait_delay)}", end="", flush=True)
+            time.sleep(min(1, wait_delay))
+        print("")
+
+    # Processing jobs
+    print("")
     print("Processing files ".ljust(CMD_HEADER_WIDTH, '='))
     queue_start = time.monotonic()
     queue_counter = 0
@@ -276,7 +402,7 @@ def main():
                 for arg in ENCODER_METADATA_EXCLUDE:
                     if job[i] == arg[0]:
                         i += arg[1]
-                        continue
+                        break
                 else:
                     metadata_encoder_settings.append(job[i])
                     i += 1
@@ -292,11 +418,27 @@ def main():
     queue_finish = time.monotonic()
 
     print("".ljust(CMD_HEADER_WIDTH, '='))
-    print(f"Done. Encoded {len(job_queue)} inputs into {queue_counter} outputs in {timedelta(queue_finish-queue_start)}")
+    print(f"Done. Encoded {len(job_queue)} inputs into {queue_counter} outputs in {sec_tostring(queue_finish-queue_start)}")
+
+    # Job completion action
+    if jobsfinished_action == JobsFinishedAction.CLOSE:
+        pass
+    elif jobsfinished_action == JobsFinishedAction.HALT:
+        global _halt_on_exit
+        _halt_on_exit = True
+    elif jobsfinished_action == JobsFinishedAction.EXECUTE:
+        subprocess.run(jobsfinished_command, shell=True)
+    else:
+        if jobsfinished_action in jobsfinished_commands:
+            subprocess.run(jobsfinished_commands[jobsfinished_action], check=False)
+        else:
+            print(f"Action '{jobsfinished_action}' is not supported on this OS.")
+            input("Press Enter to close...")
 
 
 if __name__ == "__main__":
     exit_code = 0
+
     #checking launch from IDE
     if '--debug' in sys.argv:
         sys.argv.remove('--debug')

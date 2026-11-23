@@ -58,6 +58,12 @@ PRESET_LENS = {
         ("ExifTool", "Canon", "LensType"): "Canon EF 50mm f/1.8 STM",
         ("ExifTool", "Canon", "LensModel"): "Canon EF 50mm f/1.8 STM"
     },
+    "Canon RF 50mm F1.4 L VCM": {
+        ("ExifTool", "ExifIFD", "LensInfo"): "50mm f/1.4",
+        ("ExifTool", "ExifIFD", "LensModel"): "Canon RF 50mm F1.4 L VCM",
+        ("ExifTool", "Canon", "LensType"): "Canon RF 50mm F1.4 L VCM",
+        ("ExifTool", "Canon", "LensModel"): "Canon RF 50mm F1.4 L VCM"
+    },
     "Sigma 8-16mm f/4.5-5.6 DC HSM": {
         ("ExifTool", "ExifIFD", "LensInfo"): "8-16mm f/4.5-5.6",
         ("ExifTool", "ExifIFD", "LensModel"): "Sigma 8-16mm f/4.5-5.6 DC HSM",

@@ -2,56 +2,47 @@
 A collection of scripts for reencoding camera footage. Designed for creating archival encodes while preserving metadata and automating common encoding workflows.
 
 ## tools
-- [**_metadata-carrier.py_**](#metadata-carrier) - a Python utility for preserving camera metadata when transcoding camera-original MP4 files into MKV files;
-- [**_encoder.py_**](#encoder) - a Python utility for automating encoding process using FFmpeg;
+- [**_MVI_template.avs_**](#MVI_template) - a versatile AviSynth+ script for processing multiple video clips through a predefined filter pipeline, with all the tedious work handled automatically;
+- [**_compare.avs_**](#compare) - AviSynth script to compare several video files side-by-side while maintaining resolution of original file;
 - [**_abav1-crfprobe.py_**](#abav1-crfprobe) - a Python utility for getting sample-encode scores for multiple crf values using ab-av1 tool;
-- [**_compare.avs_**](#compare) - AviSynth script to compare several video files side-by-side while maintaining resolution of original file.
+- [**_encoder.py_**](#encoder) - a Python utility for automating encoding process using FFmpeg;
+- [**_metadata-carrier.py_**](#metadata-carrier) - a Python utility for preserving camera metadata when transcoding camera-original MP4 files into MKV files.
 
 ---
 
-<a name="metadata-carrier"></a>
-## metadata-carrier.py
+<a name="MVI_template"></a>
+## MVI_template.avs
 
-A Python utility for preserving camera metadata when transcoding camera-original MP4 files into MKV (Matroska) files. Designed for my Canon EOS R7. Other similar Canon cameras should work too.
+A versatile AviSynth+ script for processing multiple video clips through a predefined filter pipeline, with all the tedious work handled automatically. Designed to simplify preparation of camera footage for encoding: instead of manually assembling AviSynth filter chains and inputs, you only need to specify input sources and adjust filter parameters at the beginning of the script.
 
-When transcoding camera originals, most camera-specific metadata is lost. This script extracts metadata from the original MP4 using ExifTool and FFprobe, filters and consolidates useful information, and transfers it into the final MKV as native Matroska tags and binary attachments.
+The script handles source loading, audio/video synchronization, format conversion, filter execution, multithreading and clip concatenation automatically. Filters can be configured globally with default values and overridden individually for each input clip. Additional preview features like compare source vs result are also supported.
+
+### Features
+- <ins>*Flexible inputs*</ins>: Combine video and audio tracks from different files, use standalone audio or image sources, and generate blank clips. Audio delay and individual source parameters can be specified.
+- <ins>*Image stabilization*</ins>: Two-pass stabilization using DePanEstimate and DePanStabilize, with automatic motion data generation and support for truly blurred mirrored edges.
+- <ins>*Video processing*</ins>: Commonly used filters such as crop, denoise, resize, sharpen, exposure and white balance adjustments are already included in the processing pipeline, with an easy way to add any other filters you need.
+- <ins>*Audio processing*</ins>: Convert channel count, sample rate and audio format; normalize and adjust volume.
+- <ins>*Additional effects*</ins>: Add subtitles, trim clips, and apply independent fade-in/fade-out effects simply by specifying their parameters — no need to insert or write any filter code.
+- <ins>*Processing previews*</ins>: Compare original and processed footage using split-screen, stacked or cropped views, optionally displaying an amplified difference image. Crop preview can also mark the selected crop area without actually cropping the image.
+- <ins>*Debug information*</ins>: Display clip index, timestamp and frame number directly in the preview.
+- <ins>*Flexible configuration and automation*</ins>: Every filter/conversion can be independently enabled or disabled using dedicated options. The script also handles multithreading and automatic concatenation of all processed clips into a single output sequence.
 
 ### Workflow
-Script contains 2 mode of operation: metadata extraction mode and metadata insertion mode. Mode of operation is determined by extension of the input files.
+- Define input clips and their video/audio sources in the `inputs` array.
+- Configure desired filters using their default parameters and optional per-clip overrides.
+- Enable comparison or other preview/debug options while tweaking parameters.
+- Pass script to encoder for final render.
 
-Extraction mode:
-- User drops original MP4 file(s) onto the script.
-- Camera shooting metadata is exctracted using *ExifTool*.
-- Stream properties are exctracted using *FFprobe*.
-- The whole MP4 header (everything before the first `mdat` atom) is extracted in binary form.
-- *ExifTool* and *FFprobe* data is merged into a single metadata dictionary.
-- This dictionary is refactored to fix known issues, move data into proper tags and drop useless data. Also user is asked for missing/additional information which can be taken from stored location and lens presets.
-- Dictionary with consolidated tag values for MKV container is build from metadata dictionary.
-- Metadata dictionary is encoded into JSON file and with binary MP4 header is compressed into ZIP-archive.
-- Tag dictionary is saved into XML file.
-
-Insertion mode:
-- User drops final MKV file(s) along with XML tag file(s) and any attachment files onto the script.
-- Input files are grouped by first 8 characters in their filenames (parent directory must match too).
-- For each group container, tags and attachment files are determined by their extensions and suffixes.
-- Tags and attachments are inserted into container using *mkvpropedit* from *MKVToolNix*.
+For more detailed information and nuances read comments in the script itself. AviSynth+ version 3.7.6 or later is required.
 
 ---
 
-<a name="encoder"></a>
-## encoder.py
+<a name="compare"></a>
+## compare.avs
 
-A Python utility for automating encoding process using FFmpeg.
+AviSynth script to compare several video files side-by-side while maintaining resolution of original file (output image is cropped accordingly).
 
-Encoding parameters are defined in encoder presets at the beginning of the script. Value of any argument can be defined as to be asked from the user at a runtime. Multiple arguments with multiple values can be defined. In this case the product of all combinations of argument values is added to the job queue. Also filename variables can be used in argument values. If output container is MKV, encoder arguments and version are added in it as global tags. Encoder arguments stored can be filtered via corresponding tuple so arguments containing irrelevant information or file paths can be excluded. 
-
-### Workflow
-- User drops file(s) to be encoded onto the script.
-- User is asked the name of encoder preset to be used.
-- Variable arguments values are asked for each file (if defined in a preset).
-- Product of all combinations of specified arguments is added to the job queue.
-- Encoding process is performed for each job in a queue.
-- Metadata about encoding is inserted into final files (if container is MKV).
+Define files to be compared in the `files` array at the beginning of the script. Each file will be cropped and stacked side-by-side so that the resulting resolution will be the same as the single file resolution. If `diff_show` is set to `True`, the second row will appear (cropping files again) containing difference between the first file and every other one. If `diff_levels` is set to `True`, difference will be amplified using `Levels` function to be more visible.
 
 ---
 
@@ -70,9 +61,48 @@ You can drop a bunch of files onto the script, enter crf values you are interest
 
 ---
 
-<a name="compare"></a>
-## compare.avs
+<a name="encoder"></a>
+## encoder.py
 
-AviSynth script to compare several video files side-by-side while maintaining resolution of original file (output image is cropped accordingly).
+A Python utility for automating encoding process using FFmpeg.
 
-Define files to be compared in the `files` array at the beginning of the script. Each file will be cropped and stacked side-by-side so that the resulting resolution will be the same as the single file resolution. If `diff_show` is set to `True`, the second row will appear (cropping files again) containing difference between the first file and every other one. If `diff_levels` is set to `True`, difference will be amplified be `Levels` to be more visible.
+Encoding parameters are defined in encoder presets at the beginning of the script. Value of any argument can be defined as to be asked from the user at a runtime. Multiple arguments with multiple values can be defined. In this case the product of all combinations of argument values is added to the job queue. Also filename variables can be used in argument values. If output container is MKV, encoder arguments and version are added in it as global tags. Encoder arguments stored can be filtered via corresponding tuple so arguments containing irrelevant information or file paths can be excluded. 
+
+### Workflow
+- User drops file(s) to be encoded onto the script.
+- User is asked the name of encoder preset to be used.
+- Variable arguments values are asked for each file (if defined in a preset).
+- Product of all combinations of specified arguments is added to the job queue.
+- Encoding process is performed for each job in a queue.
+- Metadata about encoding is inserted into final files (if container is MKV).
+
+**Configure or at least check existing presets to suit your needs. <ins>DO NOT</ins> blindly use them for your case.**
+
+---
+
+<a name="metadata-carrier"></a>
+## metadata-carrier.py
+
+A Python utility for preserving camera metadata when transcoding camera-original MP4 files into MKV (Matroska) files. Designed for my Canon EOS R7. Should also work for other similar Canon cameras.
+
+When transcoding camera originals, most camera-specific metadata is lost. This script extracts metadata from the original MP4 using ExifTool and FFprobe, filters and consolidates useful information, and transfers it into the final MKV as native Matroska tags and binary attachments.
+
+### Workflow
+Script contains 2 modes of operation: metadata extraction mode and metadata insertion mode. Mode of operation is determined by extension of the input files.
+
+Extraction mode:
+- User drops original MP4 file(s) onto the script.
+- Camera shooting metadata is exctracted using *ExifTool*.
+- Stream properties are exctracted using *FFprobe*.
+- The whole MP4 header (everything before the first `mdat` atom) is extracted in binary form.
+- *ExifTool* and *FFprobe* data is merged into a single metadata dictionary.
+- This dictionary is refactored to fix known issues, move data into proper tags and drop useless data. Also user is asked for missing/additional information which can be taken from stored location and lens presets.
+- Dictionary with consolidated tag values for MKV container is built from metadata dictionary.
+- Metadata dictionary is encoded into JSON file and with binary MP4 header is compressed into ZIP-archive.
+- Tag dictionary is saved into XML file.
+
+Insertion mode:
+- User drops final MKV file(s) along with XML tag file(s) and any attachment files onto the script.
+- Input files are grouped by first 8 characters in their filenames (parent directory must match too).
+- For each group container, tags and attachment files are determined by their extensions and suffixes.
+- Tags and attachments are inserted into container using *mkvpropedit* from *MKVToolNix*.
