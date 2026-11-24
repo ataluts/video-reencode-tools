@@ -153,10 +153,7 @@ for (i = 0, inputs_count) { trim_perclip = ArrayAdd(trim_perclip, "") }
 fade_default = """ enabled=false, in_positional=SecToFrames(0.5), in_color_yuv=Color_RGBToYUV($000000, "709:f"), out_positional=SecToFrames(0.5), out_color_yuv=Color_RGBToYUV($000000, "709:f") """
 fade_perclip = []
 for (i = 0, inputs_count) { fade_perclip = ArrayAdd(fade_perclip, "") }
-fade_perclip = ArraySet(fade_perclip, """ in_positional=0 """, 0)
-fade_perclip = ArraySet(fade_perclip, """ out_positional=0 """, 1)
-fade_perclip = ArraySet(fade_perclip, """ in_positional=0, out_positional=SecToFrames(2.0) """, 2)
-fade_perclip = ArraySet(fade_perclip, """ out_positional=0 """, 3)
+#fade_perclip = ArraySet(fade_perclip, """ enabled=true """, 0)
 
 
 # Define preview parameters ===================================================================================================
@@ -181,7 +178,7 @@ for (i = 0, inputs_count) { info_perclip = ArrayAdd(info_perclip, "") }
 # Convert levels from PC to TV range.
 # This is a workaround to correctly display full range image in those players which assume limited range by default.
 # Enable only for preview in a player, ffmpeg determines range correctly.
-rangefix = """ enabled=true, warning=true, text="RANGE", x=-5, y=0, font="Consolas", size=28, bold=false, italic=false, text_color=color_yellow, halo_color=color_black, align=align_topright """
+rangefix = """ enabled=false, warning=true, text="RANGE", x=-5, y=0, font="Consolas", size=28, bold=false, italic=false, text_color=color_yellow, halo_color=color_black, align=align_topright """
 
 
 # Set filter modes ============================================================================================================
