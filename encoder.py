@@ -308,9 +308,10 @@ def main():
             jobsfinished_command = ""
             break
         except ValueError:
-            if user_input.startswith("execute:") and user_input[8:].strip():
+            prefix = JobsFinishedAction.EXECUTE.value + ":"
+            if user_input.startswith(prefix) and user_input[len(prefix):].strip(): 
                 jobsfinished_action = JobsFinishedAction.EXECUTE
-                jobsfinished_command = user_input[8:].strip()
+                jobsfinished_command = user_input[len(prefix):].strip()
                 break
             print(f"{CMD_INDENT}Invalid action. Available options: {', '.join(a.value for a in JobsFinishedAction)}")
     while True:

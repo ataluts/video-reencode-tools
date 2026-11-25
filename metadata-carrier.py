@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import struct
 import zipfile
+import csv
 import re
 import math
 from datetime import datetime
@@ -12,7 +13,7 @@ from typing import Any
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass, field
 
-_module_date     = datetime(2026, 7, 20)
+_module_date     = datetime(2026, 11, 25)
 _module_designer = "Alexander Taluts"
 _halt_on_exit    = True
 _debug           = False
@@ -140,11 +141,13 @@ class MKV:
 
     container   : Path  = Path("")
     tags        : Path  = Path("")
+    metrics     : Path  = None
     attachments : list[Attachment] = field(default_factory=list)
 
     def validate(self) -> tuple(bool, str):
         if not self.container.is_file(): return False, "container file is missing."
         if not self.tags.is_file(): return False, "tags file is missing."
+        if self.metrics is not None and not self.metrics.is_file(): return False, "metrics file is missing."
         for file in self.attachments:
             if not file.path.is_file(): return False, f"attachment {file} is missing."
             if not file.name: return False, f"attachment {file} has no name."
@@ -368,6 +371,36 @@ def metadata_decode_mkvxml_stdout(file: Path, mkvextract_path: Path = None) -> d
 
     root = ElementTree.fromstring(result.stdout)
     return metadata_decode_mkvxml_root(root)
+
+
+#Decodes metadata from ffmetrics output in csv file
+def metadata_decode_ffmetrics_file(file: Path, item_path: Path = None, item_index: int = None) -> dict:
+    # read results for all files from metrics file
+    data = []
+    with open(file, 'r', encoding="utf-8") as csvFile:
+        csvReader = csv.DictReader(csvFile, delimiter='\t')
+        for row in csvReader:
+            data.append(row)
+
+    # get data for required file from results
+    if item_path is not None:
+        for item in data:
+            if item["FileSpec"] == str(item_path):
+                return item
+    if item_index is not None and item_index >= 0 and item_index < len(data):
+        return data[item_index]
+    
+    print(f"{CMD_INDENT}Cannot identify required item in FFMetrics results:")
+    for i, item in enumerate(data):
+        print(f"{CMD_INDENT}{CMD_INDENT}{i}. {item['FileSpec']}")
+    while True:
+        user_input = input(f"{CMD_INDENT}Enter file index [0]: ").strip() or "0"
+        try:
+            item_index = int(user_input)
+            if item_index >= 0 and item_index < len(data):
+                return data[item_index]
+        except ValueError:
+            pass
 
 
 #Decodes metadata from XML tree
@@ -784,334 +817,425 @@ def metadata_refactor(metadata: dict) -> dict:
 #Builds tags from metadata
 def tags_build(metadata: dict) -> dict:
     result = {}
-    #EXIF -> Document name
-    document_name = NestedDict.get(metadata, ("ExifTool", "IFD0", "DocumentName"))
-    if document_name:
-        NestedDict.set(result, ("EXIF", "DocumentName"), document_name)
 
-    #EXIF -> Description
-    description = NestedDict.get(metadata, ("ExifTool", "IFD0", "ImageDescription"))
-    if description:
-        NestedDict.set(result, ("EXIF", "Description"), description)
+    # ExifTool
+    if "ExifTool" in metadata:
+        metadata_group = metadata["ExifTool"]
+        result_group = {}
 
-    #EXIF -> Original DateTime
-    datetime_value  = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "DateTimeOriginal"))
-    datetime_offset = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "OffsetTimeOriginal"))
-    if datetime_value:
-        if datetime_offset: datetime_value += f" ({datetime_offset})"
-        NestedDict.set(result, ("EXIF", "DateTimeOriginal"), datetime_value)
+        # EXIF -> Document name
+        document_name = NestedDict.get(metadata_group, ("IFD0", "DocumentName"))
+        if document_name:
+            result_group["DocumentName"] = document_name
 
-    #EXIF -> GPS
-    gps = NestedDict.get(metadata, ("ExifTool", 'GPS'))
-    if gps:
-        gps_lat = gps.get('GPSLatitude')
-        gps_lon = gps.get('GPSLongitude')
-        if gps_lat is not None and gps_lon is not None:
-            if "S" in gps.get("GPSLatitudeRef", ""): gps_lat = -gps_lat
-            if "W" in gps.get("GPSLongitudeRef", ""): gps_lon = -gps_lon
-            gps_str = f"lat: {gps_lat:.6f}; lon: {gps_lon:.6f}"
-            gps_alt = gps.get('GPSAltitude')
-            if gps_alt:
-                if "B" in gps.get("GPSAltitudeRef", ""): gps_alt = -gps_alt
-                gps_str += f"; alt: {gps_alt:.1f}"
-            gps_date = gps.get("GPSDateStamp")
-            gps_time = gps.get("GPSTimeStamp")
-            if gps_date and gps_time:
-                gps_str += f"; time: {gps_date} {gps_time}"
-            gps_area = gps.get("GPSAreaInformation")
-            if gps_area: gps_str += f"; area: {gps_area}"
+        # EXIF -> Description
+        description = NestedDict.get(metadata_group, ("IFD0", "ImageDescription"))
+        if description:
+            result_group["Description"] = description
 
-            NestedDict.set(result, ("EXIF", "GPS"), gps_str)
+        # EXIF -> Original DateTime
+        datetime_value  = NestedDict.get(metadata_group, ("ExifIFD", "DateTimeOriginal"))
+        datetime_offset = NestedDict.get(metadata_group, ("ExifIFD", "OffsetTimeOriginal"))
+        if datetime_value:
+            if datetime_offset: datetime_value += f" ({datetime_offset})"
+            result_group["DateTimeOriginal"] = datetime_value
 
-    #EXIF -> Camera
-    camera_make  = NestedDict.get(metadata, ("ExifTool", "IFD0", "Make"))
-    camera_model = NestedDict.get(metadata, ("ExifTool", "IFD0", "Model"))
-    camera_fv    = NestedDict.get(metadata, ("ExifTool", "Canon", "CanonFirmwareVersion"))
-    camera_sn    = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "SerialNumber"))
-    camera_owner = NestedDict.get(metadata, ("ExifTool", "Canon", "OwnerName"))
-    if camera_make in camera_model: camera_str = camera_model
-    else:                           camera_str = f"{camera_make} {camera_model}"
-    if camera_fv: camera_fv = camera_fv.replace("Firmware Version ", "")
-    if camera_fv or camera_sn or camera_owner:
-        camera_str += " ("
-        if camera_fv: camera_str += f"f/v: {camera_fv}; "
-        if camera_sn: camera_str += f"s/n: {camera_sn}; "
-        if camera_owner: camera_str += f"owner: {camera_owner}"
-        camera_str = camera_str.strip(" ").strip(";")
-        camera_str += ")"
-    NestedDict.set(result, ("EXIF", "Camera"), camera_str)
+        # EXIF -> GPS
+        gps = NestedDict.get(metadata_group, ('GPS'))
+        if gps:
+            gps_lat = gps.get('GPSLatitude')
+            gps_lon = gps.get('GPSLongitude')
+            if gps_lat is not None and gps_lon is not None:
+                if "S" in gps.get("GPSLatitudeRef", ""): gps_lat = -gps_lat
+                if "W" in gps.get("GPSLongitudeRef", ""): gps_lon = -gps_lon
+                gps_str = f"lat: {gps_lat:.6f}; lon: {gps_lon:.6f}"
+                gps_alt = gps.get('GPSAltitude')
+                if gps_alt:
+                    if "B" in gps.get("GPSAltitudeRef", ""): gps_alt = -gps_alt
+                    gps_str += f"; alt: {gps_alt:.1f}"
+                gps_date = gps.get("GPSDateStamp")
+                gps_time = gps.get("GPSTimeStamp")
+                if gps_date and gps_time:
+                    gps_str += f"; time: {gps_date} {gps_time}"
+                gps_area = gps.get("GPSAreaInformation")
+                if gps_area: gps_str += f"; area: {gps_area}"
 
-    #EXIF -> Lens
-    lens_model = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "LensModel"))
-    lens_sn    = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "LensSerialNumber"))
-    if lens_model:
-        if (isinstance(lens_sn, int) and lens_sn != 0) or (isinstance(lens_sn, str) and len(lens_sn.strip().replace('0', '')) > 0):
-            lens_model += f" (s/n: {lens_sn})"
-        NestedDict.set(result, ("EXIF", "Lens"), lens_model)
+                result_group["GPS"] = gps_str
 
-    #EXIF -> Focal length
-    focal_length = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "FocalLength"))
-    if focal_length:
-        if isinstance(focal_length, (int, float)):
-            pass
-        elif isinstance(focal_length, str):
-            match = re.search(r'\d+(?:\.\d+)?', focal_length)
-            if match:
-                try: focal_length = float(match.group())
-                except ValueError: focal_length = 0
-        if focal_length > 0:
-            NestedDict.set(result, ("EXIF", "FocalLength"), f"{focal_length:g}mm")
+        # EXIF -> Camera
+        camera_make  = NestedDict.get(metadata_group, ("IFD0", "Make"))
+        camera_model = NestedDict.get(metadata_group, ("IFD0", "Model"))
+        camera_fv    = NestedDict.get(metadata_group, ("Canon", "CanonFirmwareVersion"))
+        camera_sn    = NestedDict.get(metadata_group, ("ExifIFD", "SerialNumber"))
+        camera_owner = NestedDict.get(metadata_group, ("Canon", "OwnerName"))
+        if camera_model:
+            if camera_make in camera_model: camera_str = camera_model
+            else:                           camera_str = f"{camera_make} {camera_model}"
+            if camera_fv: camera_fv = camera_fv.replace("Firmware Version ", "")
+            if camera_fv or camera_sn or camera_owner:
+                camera_str += " ("
+                if camera_fv: camera_str += f"f/v: {camera_fv}; "
+                if camera_sn: camera_str += f"s/n: {camera_sn}; "
+                if camera_owner: camera_str += f"owner: {camera_owner}"
+                camera_str = camera_str.strip(" ").strip(";")
+                camera_str += ")"
+            result_group["Camera"] = camera_str
 
-    #EXIF -> Orientation
-    orientation = NestedDict.get(metadata, ("ExifTool", "IFD0", "Orientation"))
-    if orientation:
-        orientation_str = orientation.replace(" (normal)", "")
-        orientation_roll = NestedDict.get(metadata, ("ExifTool", "Canon", "RollAngle"))
-        orientation_pitch = NestedDict.get(metadata, ("ExifTool", "Canon", "PitchAngle"))
-        if orientation_roll is not None and orientation_pitch is not None:
-            orientation_str += f" (roll: {orientation_roll:.1f}°; pitch: {orientation_pitch:.1f}°)"
-        NestedDict.set(result, ("EXIF", "Orientation"), orientation_str)
+        # EXIF -> Lens
+        lens_model = NestedDict.get(metadata_group, ("ExifIFD", "LensModel"))
+        lens_sn    = NestedDict.get(metadata_group, ("ExifIFD", "LensSerialNumber"))
+        if lens_model:
+            if (isinstance(lens_sn, int) and lens_sn != 0) or (isinstance(lens_sn, str) and len(lens_sn.strip().replace('0', '')) > 0):
+                lens_model += f" (s/n: {lens_sn})"
+            result_group["Lens"] = lens_model
 
-    #EXIF -> Exposure
-    exposure_prog = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "ExposureProgram"))
-
-    exposure_tv = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "ExposureTime"))
-    if isinstance(exposure_tv, (int, float)):
-        exposure_tv_num = exposure_tv
-    elif exposure_tv == "undef":
-        exposure_tv = 0
-        exposure_tv_num = exposure_tv
-    else:
-        match = re.search(r'\b(\d+)/(\d+)\b', exposure_tv)
-        if match:
-            exposure_tv = (int(match.group(1)), int(match.group(2)))
-            exposure_tv_num = exposure_tv[0] / exposure_tv[1]
-        else:
-            exposure_tv = -1
-            exposure_tv_num = exposure_tv
-
-    exposure_av = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "FNumber"))
-    if isinstance(exposure_av, (int, float)):
-        pass
-    elif exposure_av == "undef":
-        exposure_av = 0
-    else:
-        match = re.search(r'[fF]/(\d+\.\d+)', exposure_av)
-        if match:
-            exposure_av = float(match.group(1))
-        else:
-            exposure_av = -1
-    
-    exposure_iso = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "ISO"))
-    if isinstance(exposure_iso, (int, float)):
-        pass
-    elif exposure_iso == "undef":
-        exposure_iso = 0
-    else:
-        try:
-            exposure_iso = float(exposure_iso)
-        except ValueError:
-            exposure_iso = -1
-
-    exposure_lv = NestedDict.get(metadata, ("ExifTool", "Canon", "MeasuredEV"))
-    if isinstance(exposure_lv, (int, float)):
-        pass
-    else:
-        try:
-            exposure_lv = float(exposure_iso)
-        except ValueError:
-            exposure_lv = None
-
-    exposure_ec = NestedDict.get(metadata, ("ExifTool", "ExifIFD", "ExposureCompensation"))
-    if isinstance(exposure_ec, (int, float)):
-        pass
-    else:
-        match = re.search(r'([+-]?)\b(\d+)/(\d+)\b', exposure_ec)
-        if match:
-            if match.group(1) == "-": exposure_ec = (-int(match.group(2)), int(match.group(3)))
-            else:                     exposure_ec = ( int(match.group(2)), int(match.group(3)))
-        else:
-            exposure_ec = None
-
-    if   exposure_prog == "Not Defined":                exposure_prog = "n/d"
-    elif exposure_prog == "Manual":                     exposure_prog = "M"
-    elif exposure_prog == "Program AE":                 exposure_prog = "P"
-    elif exposure_prog == "Aperture-priority AE":       exposure_prog = "Av"
-    elif exposure_prog == "Shutter speed priority AE":  exposure_prog = "Tv"
-    elif exposure_prog == "Creative (Slow speed)":      exposure_prog = "Creative"
-    elif exposure_prog == "Action (High speed)":        exposure_prog = "Action"
-    elif exposure_prog == "Portrait":                   exposure_prog = "Portrait"
-    elif exposure_prog == "Landscape":                  exposure_prog = "Landscape"
-    elif exposure_prog == "Bulb":                       exposure_prog = "B"
-    else: pass
-
-    if   exposure_tv_num > 0 and exposure_av > 0 and exposure_iso > 0: exposure_ev = f"{math.log2((exposure_av ** 2) / exposure_tv_num) - math.log2(exposure_iso / 100):.2f}"
-    elif exposure_tv_num < 0 or exposure_av < 0 or exposure_iso < 0:   exposure_ev = "n/d"
-    else:                                                              exposure_ev = "Auto"
-
-    if exposure_tv_num > 0:
-        if isinstance(exposure_tv, tuple): exposure_tv = f"{exposure_tv[0]}/{exposure_tv[1]}s"
-        else: exposure_tv = f"{exposure_tv:g}s"
-    elif exposure_tv_num == 0: exposure_tv = "Auto"
-    else:                      exposure_tv = "n/d"
-
-    if   exposure_av >  0: exposure_av = f"f/{exposure_av:.2g}"
-    elif exposure_av == 0: exposure_av = "Auto"
-    else:                  exposure_av = "n/d"
-
-    if   exposure_iso >  0: exposure_iso = f"{exposure_iso:g}"
-    elif exposure_iso == 0: exposure_iso = "Auto"
-    else:                   exposure_iso = "n/d"
-
-    if exposure_lv is not None: exposure_lv = f"{exposure_lv:.2f}"
-    else:                       exposure_lv = "n/d"
-
-    if exposure_ec is not None:
-        if isinstance(exposure_ec, tuple): exposure_ec = f"{exposure_ec[0]:+}/{exposure_ec[1]}"
-        elif exposure_ec == 0:             exposure_ec = "0"
-        else:                              exposure_ec = f"{exposure_ec:+g}"
-    else:                                  exposure_ec = "n/d"
-
-    exposure_str = f"Program: {exposure_prog}; Tv: {exposure_tv}; Av: {exposure_av}; ISO: {exposure_iso} (EV: {exposure_ev}; LV: {exposure_lv}; EC: {exposure_ec})"
-    NestedDict.set(result, ("EXIF", "Exposure"), exposure_str)
-
-    #EXIF -> Dynamic Range
-    dynamicrange_hdrpq = NestedDict.get(metadata, ("ExifTool", "Canon", "HDR-PQ"))
-    dynamicrange_clog = NestedDict.get(metadata, ("ExifTool", "Canon", "CanonLogVersion"))
-    if isinstance(dynamicrange_hdrpq, str) and dynamicrange_hdrpq.lower() == "on":
-        dynamicrange_str = "HDR-PQ"
-    elif isinstance(dynamicrange_clog, str) and len(dynamicrange_clog.strip()) > 0 and dynamicrange_clog.lower() != "off":
-        dynamicrange_clog_cs = NestedDict.get(metadata, ("ExifTool", "Canon", "ColorSpace2"))
-        dynamicrange_str = f"{dynamicrange_clog} [{dynamicrange_clog_cs}]"
-    else:
-        dynamicrange_str = "SDR"
-    NestedDict.set(result, ("EXIF", "DynamicRange"), dynamicrange_str)
-
-    #EXIF -> White Balance
-    wb_value = NestedDict.get(metadata, ("ExifTool", "Canon", "WhiteBalance"))
-    if wb_value:
-        if wb_value == "Manual Temperature (Kelvin)":
-            wb_temp  = NestedDict.get(metadata, ("ExifTool", "Canon", "ColorTemperature"))
-            wb_str = f"{wb_temp} K"
-        else:
-            wb_str = wb_value
-        wb_shiftAB = NestedDict.get(metadata, ("ExifTool", "Canon", "WBShiftAB"))
-        wb_shiftGM = NestedDict.get(metadata, ("ExifTool", "Canon", "WBShiftGM"))
-        if wb_shiftAB is not None and wb_shiftGM is not None:
-            if wb_shiftAB == 0: wb_shiftAB = "0"
-            else:               wb_shiftAB = f"{wb_shiftAB:+g}"
-            if wb_shiftGM == 0: wb_shiftGM = "0"
-            else:               wb_shiftGM = f"{wb_shiftGM:+g}"
-            wb_str += f" (shift: AB={wb_shiftAB}, GM={wb_shiftGM})"
-        NestedDict.set(result, ("EXIF", "WhiteBalance"), wb_str)
-
-    #EXIF -> Picture Style
-    picstyle_name = NestedDict.get(metadata, ("ExifTool", "Canon", "PictureStyle"))
-    if picstyle_name:
-        picstyle_sharp = NestedDict.get(metadata, ("ExifTool", "Canon", "Sharpness"))
-        picstyle_cont  = NestedDict.get(metadata, ("ExifTool", "Canon", "Contrast"))
-        picstyle_sat   = NestedDict.get(metadata, ("ExifTool", "Canon", "Saturation"))
-        picstyle_tone  = NestedDict.get(metadata, ("ExifTool", "Canon", "ColorTone"))
-        picstyle_clar  = NestedDict.get(metadata, ("ExifTool", "Canon", "Clarity"))
-        picstyle_str = picstyle_name
-        if picstyle_sharp or picstyle_cont or picstyle_sat or picstyle_tone or picstyle_clar:
-            picstyle_str += " ("
-            if picstyle_sharp:
-                if isinstance(picstyle_sharp, str) and picstyle_sharp.lower() == "normal": picstyle_sharp = "0"
-                picstyle_str += f"sharp: {picstyle_sharp}; "
-            if picstyle_cont:
-                if isinstance(picstyle_cont, str) and picstyle_cont.lower() == "normal": picstyle_cont = "0"
-                picstyle_str += f"cont: {picstyle_cont}; "
-            if picstyle_sat:
-                if isinstance(picstyle_sat, str) and picstyle_sat.lower() == "normal": picstyle_sat = "0"
-                picstyle_str += f"sat: {picstyle_sat}; "
-            if picstyle_tone:
-                if isinstance(picstyle_tone, str) and picstyle_tone.lower() == "normal": picstyle_tone = "0"
-                picstyle_str += f"tone: {picstyle_tone}"
-            if picstyle_clar:
-                if isinstance(picstyle_clar, str) and picstyle_clar.lower() == "normal": picstyle_clar = "0"
-                picstyle_str += f"clar: {picstyle_clar}"
-            picstyle_str = picstyle_str.strip(" ").strip(";")
-            picstyle_str += ")"
-        NestedDict.set(result, ("EXIF", "PictureStyle"), picstyle_str)
-
-    #EXIF -> Focus
-    focus_mode = NestedDict.get(metadata, ("ExifTool", "Canon", "FocusMode"))
-    if focus_mode:
-        focus_str = focus_mode
-        NestedDict.set(result, ("EXIF", "Focus"), focus_str)
-
-    #EXIF -> Image stabilization
-    imgstab = NestedDict.get(metadata, ("ExifTool", "Canon", "ImageStabilization"))
-    if imgstab:
-        imgstab_str = imgstab
-        NestedDict.set(result, ("EXIF", "ImageStabilization"), imgstab_str)
-
-    #Source -> Video
-    ffprobe_Streams_Video = NestedDict.get(metadata, ("ffprobe", "Streams", "Video"))
-    if ffprobe_Streams_Video:
-        original_video_str = f"codec: {ffprobe_Streams_Video.get('codec_name')}"
-        original_video_bitrate = ffprobe_Streams_Video.get('bit_rate')
-        if original_video_bitrate:
-            try:
-                original_video_bitrate = int(original_video_bitrate)
-                if   original_video_bitrate >= 1e9: original_video_str += f"; bitrate: {original_video_bitrate/1e9:.3g}Gbps"
-                elif original_video_bitrate >= 1e6: original_video_str += f"; bitrate: {original_video_bitrate/1e6:.3g}Mbps"
-                elif original_video_bitrate >= 1e3: original_video_str += f"; bitrate: {original_video_bitrate/1e3:.3g}kbps"
-                else:                               original_video_str += f"; bitrate: {original_video_bitrate}bps"
-            except ValueError:
+        # EXIF -> Focal length
+        focal_length = NestedDict.get(metadata_group, ("ExifIFD", "FocalLength"))
+        if focal_length:
+            if isinstance(focal_length, (int, float)):
                 pass
-        original_video_str += f"; res: {ffprobe_Streams_Video.get('width')}x{ffprobe_Streams_Video.get('height')}"
-        original_video_fps = ffprobe_Streams_Video.get('avg_frame_rate')
-        try:
-            if isinstance(original_video_fps, (int, float)):
-                original_video_fps_numerator = None
-                original_video_fps_denominator = None
-            elif isinstance(original_video_fps, str):
-                if "/" in original_video_fps:
-                    original_video_fps_numerator, original_video_fps_denominator = original_video_fps.split("/")
-                    original_video_fps_numerator = int(original_video_fps_numerator.strip())
-                    original_video_fps_denominator = int(original_video_fps_denominator.strip())
-                    original_video_fps = original_video_fps_numerator / original_video_fps_denominator
-                else:
-                    original_video_fps = float(original_video_fps.strip())
+            elif isinstance(focal_length, str):
+                match = re.search(r'\d+(?:\.\d+)?', focal_length)
+                if match:
+                    try: focal_length = float(match.group())
+                    except ValueError: focal_length = 0
+            if focal_length > 0:
+                result_group["FocalLength"] = f"{focal_length:g}mm"
+
+        # EXIF -> Orientation
+        orientation = NestedDict.get(metadata_group, ("IFD0", "Orientation"))
+        if orientation:
+            orientation_str = orientation.replace(" (normal)", "")
+            orientation_roll = NestedDict.get(metadata_group, ("Canon", "RollAngle"))
+            orientation_pitch = NestedDict.get(metadata_group, ("Canon", "PitchAngle"))
+            if orientation_roll is not None and orientation_pitch is not None:
+                orientation_str += f" (roll: {orientation_roll:.1f}°; pitch: {orientation_pitch:.1f}°)"
+            result_group["Orientation"] = orientation_str
+
+        # EXIF -> Exposure
+        exposure_prog = NestedDict.get(metadata_group, ("ExifIFD", "ExposureProgram"))
+        if exposure_prog:
+            exposure_tv = NestedDict.get(metadata_group, ("ExifIFD", "ExposureTime"))
+            if isinstance(exposure_tv, (int, float)):
+                exposure_tv_num = exposure_tv
+            elif exposure_tv == "undef":
+                exposure_tv = 0
+                exposure_tv_num = exposure_tv
             else:
-                raise ValueError
-            original_video_str += f"; fps: {original_video_fps:.2f}"
-            if original_video_fps_numerator and original_video_fps_denominator:
-                original_video_str += f" ({original_video_fps_numerator}/{original_video_fps_denominator})"
-        except ValueError:
-            pass
-        original_video_str += f"; pixfmt: {ffprobe_Streams_Video.get('pix_fmt')}"
-        original_video_str += f"; range: {ffprobe_Streams_Video.get('color_range')}"
-        original_video_str += f"; color: spc={ffprobe_Streams_Video.get('color_space')}, trf={ffprobe_Streams_Video.get('color_transfer')}, pri={ffprobe_Streams_Video.get('color_primaries')}"
-        NestedDict.set(result, ("Source", "Video"), original_video_str)
+                match = re.search(r'\b(\d+)/(\d+)\b', exposure_tv)
+                if match:
+                    exposure_tv = (int(match.group(1)), int(match.group(2)))
+                    exposure_tv_num = exposure_tv[0] / exposure_tv[1]
+                else:
+                    exposure_tv = -1
+                    exposure_tv_num = exposure_tv
 
-    #Source -> Audio
-    ffprobe_Streams_Audio = NestedDict.get(metadata, ("ffprobe", "Streams", "Audio"))
-    if ffprobe_Streams_Audio:
-        original_audio_str = f"codec: {ffprobe_Streams_Audio.get('codec_name')}"
-        original_audio_bitrate = ffprobe_Streams_Audio.get('bit_rate')
-        if original_audio_bitrate:
+            exposure_av = NestedDict.get(metadata_group, ("ExifIFD", "FNumber"))
+            if isinstance(exposure_av, (int, float)):
+                pass
+            elif exposure_av == "undef":
+                exposure_av = 0
+            else:
+                match = re.search(r'[fF]/(\d+\.\d+)', exposure_av)
+                if match:
+                    exposure_av = float(match.group(1))
+                else:
+                    exposure_av = -1
+            
+            exposure_iso = NestedDict.get(metadata_group, ("ExifIFD", "ISO"))
+            if isinstance(exposure_iso, (int, float)):
+                pass
+            elif exposure_iso == "undef":
+                exposure_iso = 0
+            else:
+                try:
+                    exposure_iso = float(exposure_iso)
+                except ValueError:
+                    exposure_iso = -1
+
+            exposure_lv = NestedDict.get(metadata_group, ("Canon", "MeasuredEV"))
+            if isinstance(exposure_lv, (int, float)):
+                pass
+            else:
+                try:
+                    exposure_lv = float(exposure_iso)
+                except ValueError:
+                    exposure_lv = None
+
+            exposure_ec = NestedDict.get(metadata_group, ("ExifIFD", "ExposureCompensation"))
+            if isinstance(exposure_ec, (int, float)):
+                pass
+            else:
+                match = re.search(r'([+-]?)\b(\d+)/(\d+)\b', exposure_ec)
+                if match:
+                    if match.group(1) == "-": exposure_ec = (-int(match.group(2)), int(match.group(3)))
+                    else:                     exposure_ec = ( int(match.group(2)), int(match.group(3)))
+                else:
+                    exposure_ec = None
+
+            if   exposure_prog == "Not Defined":                exposure_prog = "n/d"
+            elif exposure_prog == "Manual":                     exposure_prog = "M"
+            elif exposure_prog == "Program AE":                 exposure_prog = "P"
+            elif exposure_prog == "Aperture-priority AE":       exposure_prog = "Av"
+            elif exposure_prog == "Shutter speed priority AE":  exposure_prog = "Tv"
+            elif exposure_prog == "Creative (Slow speed)":      exposure_prog = "Creative"
+            elif exposure_prog == "Action (High speed)":        exposure_prog = "Action"
+            elif exposure_prog == "Portrait":                   exposure_prog = "Portrait"
+            elif exposure_prog == "Landscape":                  exposure_prog = "Landscape"
+            elif exposure_prog == "Bulb":                       exposure_prog = "B"
+            else: pass
+
+            if   exposure_tv_num > 0 and exposure_av > 0 and exposure_iso > 0: exposure_ev = f"{math.log2((exposure_av ** 2) / exposure_tv_num) - math.log2(exposure_iso / 100):.2f}"
+            elif exposure_tv_num < 0 or exposure_av < 0 or exposure_iso < 0:   exposure_ev = "n/d"
+            else:                                                              exposure_ev = "Auto"
+
+            if exposure_tv_num > 0:
+                if isinstance(exposure_tv, tuple): exposure_tv = f"{exposure_tv[0]}/{exposure_tv[1]}s"
+                else: exposure_tv = f"{exposure_tv:g}s"
+            elif exposure_tv_num == 0: exposure_tv = "Auto"
+            else:                      exposure_tv = "n/d"
+
+            if   exposure_av >  0: exposure_av = f"f/{exposure_av:.2g}"
+            elif exposure_av == 0: exposure_av = "Auto"
+            else:                  exposure_av = "n/d"
+
+            if   exposure_iso >  0: exposure_iso = f"{exposure_iso:g}"
+            elif exposure_iso == 0: exposure_iso = "Auto"
+            else:                   exposure_iso = "n/d"
+
+            if exposure_lv is not None: exposure_lv = f"{exposure_lv:.2f}"
+            else:                       exposure_lv = "n/d"
+
+            if exposure_ec is not None:
+                if isinstance(exposure_ec, tuple): exposure_ec = f"{exposure_ec[0]:+}/{exposure_ec[1]}"
+                elif exposure_ec == 0:             exposure_ec = "0"
+                else:                              exposure_ec = f"{exposure_ec:+g}"
+            else:                                  exposure_ec = "n/d"
+
+            exposure_str = f"Program: {exposure_prog}; Tv: {exposure_tv}; Av: {exposure_av}; ISO: {exposure_iso} (EV: {exposure_ev}; LV: {exposure_lv}; EC: {exposure_ec})"
+            result_group["Exposure"] = exposure_str
+
+        # EXIF -> Dynamic Range
+        dynamicrange_hdrpq = NestedDict.get(metadata_group, ("Canon", "HDR-PQ"))
+        dynamicrange_clog = NestedDict.get(metadata_group, ("Canon", "CanonLogVersion"))
+        if dynamicrange_hdrpq or dynamicrange_clog:
+            if isinstance(dynamicrange_hdrpq, str) and dynamicrange_hdrpq.lower() == "on":
+                dynamicrange_str = "HDR-PQ"
+            elif isinstance(dynamicrange_clog, str) and len(dynamicrange_clog.strip()) > 0 and dynamicrange_clog.lower() != "off":
+                dynamicrange_clog_cs = NestedDict.get(metadata_group, ("Canon", "ColorSpace2"))
+                dynamicrange_str = f"{dynamicrange_clog} [{dynamicrange_clog_cs}]"
+            else:
+                dynamicrange_str = "SDR"
+            result_group["DynamicRange"] = dynamicrange_str
+
+        # EXIF -> White Balance
+        wb_value = NestedDict.get(metadata_group, ("Canon", "WhiteBalance"))
+        if wb_value:
+            if wb_value == "Manual Temperature (Kelvin)":
+                wb_temp  = NestedDict.get(metadata_group, ("Canon", "ColorTemperature"))
+                wb_str = f"{wb_temp} K"
+            else:
+                wb_str = wb_value
+            wb_shiftAB = NestedDict.get(metadata_group, ("Canon", "WBShiftAB"))
+            wb_shiftGM = NestedDict.get(metadata_group, ("Canon", "WBShiftGM"))
+            if wb_shiftAB is not None and wb_shiftGM is not None:
+                if wb_shiftAB == 0: wb_shiftAB = "0"
+                else:               wb_shiftAB = f"{wb_shiftAB:+g}"
+                if wb_shiftGM == 0: wb_shiftGM = "0"
+                else:               wb_shiftGM = f"{wb_shiftGM:+g}"
+                wb_str += f" (shift: AB={wb_shiftAB}, GM={wb_shiftGM})"
+            result_group["WhiteBalance"] = wb_str
+
+        # EXIF -> Picture Style
+        picstyle_name = NestedDict.get(metadata_group, ("Canon", "PictureStyle"))
+        if picstyle_name:
+            picstyle_sharp = NestedDict.get(metadata_group, ("Canon", "Sharpness"))
+            picstyle_cont  = NestedDict.get(metadata_group, ("Canon", "Contrast"))
+            picstyle_sat   = NestedDict.get(metadata_group, ("Canon", "Saturation"))
+            picstyle_tone  = NestedDict.get(metadata_group, ("Canon", "ColorTone"))
+            picstyle_clar  = NestedDict.get(metadata_group, ("Canon", "Clarity"))
+            picstyle_str = picstyle_name
+            if picstyle_sharp or picstyle_cont or picstyle_sat or picstyle_tone or picstyle_clar:
+                picstyle_str += " ("
+                if picstyle_sharp:
+                    if isinstance(picstyle_sharp, str) and picstyle_sharp.lower() == "normal": picstyle_sharp = "0"
+                    picstyle_str += f"sharp: {picstyle_sharp}; "
+                if picstyle_cont:
+                    if isinstance(picstyle_cont, str) and picstyle_cont.lower() == "normal": picstyle_cont = "0"
+                    picstyle_str += f"cont: {picstyle_cont}; "
+                if picstyle_sat:
+                    if isinstance(picstyle_sat, str) and picstyle_sat.lower() == "normal": picstyle_sat = "0"
+                    picstyle_str += f"sat: {picstyle_sat}; "
+                if picstyle_tone:
+                    if isinstance(picstyle_tone, str) and picstyle_tone.lower() == "normal": picstyle_tone = "0"
+                    picstyle_str += f"tone: {picstyle_tone}"
+                if picstyle_clar:
+                    if isinstance(picstyle_clar, str) and picstyle_clar.lower() == "normal": picstyle_clar = "0"
+                    picstyle_str += f"clar: {picstyle_clar}"
+                picstyle_str = picstyle_str.strip(" ").strip(";")
+                picstyle_str += ")"
+            result_group["PictureStyle"] = picstyle_str
+
+        # EXIF -> Focus
+        focus_mode = NestedDict.get(metadata_group, ("Canon", "FocusMode"))
+        if focus_mode:
+            focus_str = focus_mode
+            result_group["Focus"] = focus_str
+
+        # EXIF -> Image stabilization
+        imgstab = NestedDict.get(metadata_group, ("Canon", "ImageStabilization"))
+        if imgstab:
+            imgstab_str = imgstab
+            result_group["ImageStabilization"] = imgstab_str
+
+        if result_group:
+            result["EXIF"] = result_group
+
+    # ffprobe
+    if "ffprobe" in metadata:
+        metadata_group = metadata["ffprobe"]
+        result_group = {}
+
+        # Source -> Video
+        ffprobe_Streams_Video = NestedDict.get(metadata_group, ("Streams", "Video"))
+        if ffprobe_Streams_Video:
+            original_video_str = f"codec: {ffprobe_Streams_Video.get('codec_name')}"
+            original_video_bitrate = ffprobe_Streams_Video.get('bit_rate')
+            if original_video_bitrate:
+                try:
+                    original_video_bitrate = int(original_video_bitrate)
+                    if   original_video_bitrate >= 1e9: original_video_str += f"; bitrate: {original_video_bitrate/1e9:.3g}Gbps"
+                    elif original_video_bitrate >= 1e6: original_video_str += f"; bitrate: {original_video_bitrate/1e6:.3g}Mbps"
+                    elif original_video_bitrate >= 1e3: original_video_str += f"; bitrate: {original_video_bitrate/1e3:.3g}kbps"
+                    else:                               original_video_str += f"; bitrate: {original_video_bitrate}bps"
+                except ValueError:
+                    pass
+            original_video_str += f"; res: {ffprobe_Streams_Video.get('width')}x{ffprobe_Streams_Video.get('height')}"
+            original_video_fps = ffprobe_Streams_Video.get('avg_frame_rate')
             try:
-                original_audio_bitrate = int(original_audio_bitrate)
-                original_audio_str += f"; bitrate: {original_audio_bitrate/1e3:.4g}kbps"
+                if isinstance(original_video_fps, (int, float)):
+                    original_video_fps_numerator = None
+                    original_video_fps_denominator = None
+                elif isinstance(original_video_fps, str):
+                    if "/" in original_video_fps:
+                        original_video_fps_numerator, original_video_fps_denominator = original_video_fps.split("/")
+                        original_video_fps_numerator = int(original_video_fps_numerator.strip())
+                        original_video_fps_denominator = int(original_video_fps_denominator.strip())
+                        original_video_fps = original_video_fps_numerator / original_video_fps_denominator
+                    else:
+                        original_video_fps = float(original_video_fps.strip())
+                else:
+                    raise ValueError
+                original_video_str += f"; fps: {original_video_fps:.2f}"
+                if original_video_fps_numerator and original_video_fps_denominator:
+                    original_video_str += f" ({original_video_fps_numerator}/{original_video_fps_denominator})"
             except ValueError:
                 pass
-        original_audio_channels = ffprobe_Streams_Audio.get('channels')
-        if original_audio_channels:
-            original_audio_str += f"; channels: {original_audio_channels}"
-        original_audio_samplerate = ffprobe_Streams_Audio.get('sample_rate')
-        if original_audio_samplerate:
-            try:
-                original_audio_samplerate = int(original_audio_samplerate)
-                original_audio_str += f"; samplerate: {original_audio_samplerate/1e3:.6g}kHz"
-            except ValueError:
-                pass
-        NestedDict.set(result, ("Source", "Audio"), original_audio_str)
+            original_video_str += f"; pixfmt: {ffprobe_Streams_Video.get('pix_fmt')}"
+            original_video_str += f"; range: {ffprobe_Streams_Video.get('color_range')}"
+            original_video_str += f"; color: spc={ffprobe_Streams_Video.get('color_space')}, trf={ffprobe_Streams_Video.get('color_transfer')}, pri={ffprobe_Streams_Video.get('color_primaries')}"
+            result_group["Video"] = original_video_str
 
-    #Source -> Metadata
-    NestedDict.set(result, ("Source", "Metadata"), "Full source file metadata is in the attached ZIP archive.")
+        # Source -> Audio
+        ffprobe_Streams_Audio = NestedDict.get(metadata_group, ("Streams", "Audio"))
+        if ffprobe_Streams_Audio:
+            original_audio_str = f"codec: {ffprobe_Streams_Audio.get('codec_name')}"
+            original_audio_bitrate = ffprobe_Streams_Audio.get('bit_rate')
+            if original_audio_bitrate:
+                try:
+                    original_audio_bitrate = int(original_audio_bitrate)
+                    original_audio_str += f"; bitrate: {original_audio_bitrate/1e3:.4g}kbps"
+                except ValueError:
+                    pass
+            original_audio_channels = ffprobe_Streams_Audio.get('channels')
+            if original_audio_channels:
+                original_audio_str += f"; channels: {original_audio_channels}"
+            original_audio_samplerate = ffprobe_Streams_Audio.get('sample_rate')
+            if original_audio_samplerate:
+                try:
+                    original_audio_samplerate = int(original_audio_samplerate)
+                    original_audio_str += f"; samplerate: {original_audio_samplerate/1e3:.6g}kHz"
+                except ValueError:
+                    pass
+            result_group["Audio"] = original_audio_str
+
+        # Source -> Metadata
+        result_group["Metadata"] = "Full source file metadata is in the attached ZIP archive."
+
+        if result_group:
+            result["Source"] = result_group
+
+    # Metrics
+    if "FFMetrics" in metadata:
+        metadata_group = metadata["FFMetrics"]
+        result_group = {}
+
+        # Metrics -> PSNR
+        if "PSNR-Value" in metadata_group:
+            if metadata_group["PSNR-Value"]:
+                metrics_psnr_precision = 2
+                metrics_psnr_avg  = float(metadata_group["PSNR-Value"])
+                metrics_psnr_mean = float(metadata_group["PSNR-MeanA"])
+                metrics_psnr_min  = float(metadata_group["PSNR-Min"])
+                metrics_psnr_max  = float(metadata_group["PSNR-Max"])
+                metrics_psnr_sdev = float(metadata_group["PSNR-StdDevP"])
+                metrics_psnr_p1   = float(metadata_group["PSNR-Percentile01"])
+                metrics_psnr_p5   = float(metadata_group["PSNR-Percentile05"])
+                metrics_psnr_p10  = float(metadata_group["PSNR-Percentile10"])
+                metrics_psnr_p25  = float(metadata_group["PSNR-Percentile25"])
+                metrics_psnr_str = f"avg: {metrics_psnr_avg:.{metrics_psnr_precision}f}; mean: {metrics_psnr_mean:.{metrics_psnr_precision}f}; min: {metrics_psnr_min:.{metrics_psnr_precision}f}; max: {metrics_psnr_max:.{metrics_psnr_precision}f}; sdev: {metrics_psnr_sdev:.{metrics_psnr_precision}f}; 25%: {metrics_psnr_p25:.{metrics_psnr_precision}f}; 10%: {metrics_psnr_p10:.{metrics_psnr_precision}f}; 5%: {metrics_psnr_p5:.{metrics_psnr_precision}f}; 1%: {metrics_psnr_p1:.{metrics_psnr_precision}f}"
+                result_group["PSNR"] = metrics_psnr_str
+
+        # Metrics -> SSIM
+        if "SSIM-Value" in metadata_group:
+            if metadata_group["SSIM-Value"]:
+                metrics_ssim_precision = 4
+                metrics_ssim_avg  = float(metadata_group["SSIM-Value"])
+                metrics_ssim_mean = float(metadata_group["SSIM-MeanA"])
+                metrics_ssim_min  = float(metadata_group["SSIM-Min"])
+                metrics_ssim_max  = float(metadata_group["SSIM-Max"])
+                metrics_ssim_sdev = float(metadata_group["SSIM-StdDevP"])
+                metrics_ssim_p1   = float(metadata_group["SSIM-Percentile01"])
+                metrics_ssim_p5   = float(metadata_group["SSIM-Percentile05"])
+                metrics_ssim_p10  = float(metadata_group["SSIM-Percentile10"])
+                metrics_ssim_p25  = float(metadata_group["SSIM-Percentile25"])
+                metrics_ssim_str = f"avg: {metrics_ssim_avg:.{metrics_ssim_precision}f}; mean: {metrics_ssim_mean:.{metrics_ssim_precision}f}; min: {metrics_ssim_min:.{metrics_ssim_precision}f}; max: {metrics_ssim_max:.{metrics_ssim_precision}f}; sdev: {metrics_ssim_sdev:.{metrics_ssim_precision}f}; 25%: {metrics_ssim_p25:.{metrics_ssim_precision}f}; 10%: {metrics_ssim_p10:.{metrics_ssim_precision}f}; 5%: {metrics_ssim_p5:.{metrics_ssim_precision}f}; 1%: {metrics_ssim_p1:.{metrics_ssim_precision}f}"
+                result_group["SSIM"] = metrics_ssim_str
+
+        # Metrics -> VMAF
+        if "VMAF-Value" in metadata_group:
+            if metadata_group["VMAF-Value"]:
+                metrics_vmaf_precision = 2
+                metrics_vmaf_avg  = float(metadata_group["VMAF-Value"])
+                metrics_vmaf_mean = float(metadata_group["VMAF-MeanA"])
+                metrics_vmaf_min  = float(metadata_group["VMAF-Min"])
+                metrics_vmaf_max  = float(metadata_group["VMAF-Max"])
+                metrics_vmaf_sdev = float(metadata_group["VMAF-StdDevP"])
+                metrics_vmaf_p1   = float(metadata_group["VMAF-Percentile01"])
+                metrics_vmaf_p5   = float(metadata_group["VMAF-Percentile05"])
+                metrics_vmaf_p10  = float(metadata_group["VMAF-Percentile10"])
+                metrics_vmaf_p25  = float(metadata_group["VMAF-Percentile25"])
+                metrics_vmaf_str = f"avg: {metrics_vmaf_avg:.{metrics_vmaf_precision}f}; mean: {metrics_vmaf_mean:.{metrics_vmaf_precision}f}; min: {metrics_vmaf_min:.{metrics_vmaf_precision}f}; max: {metrics_vmaf_max:.{metrics_vmaf_precision}f}; sdev: {metrics_vmaf_sdev:.{metrics_vmaf_precision}f}; 25%: {metrics_vmaf_p25:.{metrics_vmaf_precision}f}; 10%: {metrics_vmaf_p10:.{metrics_vmaf_precision}f}; 5%: {metrics_vmaf_p5:.{metrics_vmaf_precision}f}; 1%: {metrics_vmaf_p1:.{metrics_vmaf_precision}f}"
+                result_group["VMAF"] = metrics_vmaf_str
+
+        # Metrics -> XPSNR
+        if "XPSNR-Value" in metadata_group:
+            if metadata_group["XPSNR-Value"]:
+                metrics_xpsnr_precision = 2
+                metrics_xpsnr_avg  = float(metadata_group["XPSNR-Value"])
+                metrics_xpsnr_mean = float(metadata_group["XPSNR-MeanA"])
+                metrics_xpsnr_min  = float(metadata_group["XPSNR-Min"])
+                metrics_xpsnr_max  = float(metadata_group["XPSNR-Max"])
+                metrics_xpsnr_sdev = float(metadata_group["XPSNR-StdDevP"])
+                metrics_xpsnr_p1   = float(metadata_group["XPSNR-Percentile01"])
+                metrics_xpsnr_p5   = float(metadata_group["XPSNR-Percentile05"])
+                metrics_xpsnr_p10  = float(metadata_group["XPSNR-Percentile10"])
+                metrics_xpsnr_p25  = float(metadata_group["XPSNR-Percentile25"])
+                metrics_xpsnr_str = f"avg: {metrics_xpsnr_avg:.{metrics_xpsnr_precision}f}; mean: {metrics_xpsnr_mean:.{metrics_xpsnr_precision}f}; min: {metrics_xpsnr_min:.{metrics_xpsnr_precision}f}; max: {metrics_xpsnr_max:.{metrics_xpsnr_precision}f}; sdev: {metrics_xpsnr_sdev:.{metrics_xpsnr_precision}f}; 25%: {metrics_xpsnr_p25:.{metrics_xpsnr_precision}f}; 10%: {metrics_xpsnr_p10:.{metrics_xpsnr_precision}f}; 5%: {metrics_xpsnr_p5:.{metrics_xpsnr_precision}f}; 1%: {metrics_xpsnr_p1:.{metrics_xpsnr_precision}f}"
+                result_group["XPSNR"] = metrics_xpsnr_str
+
+        if result_group:
+            result["Metrics"] = result_group
 
     return result
 
@@ -1212,6 +1336,8 @@ def main():
                 mkv.container = file
             elif ext == ".xml" and file.stem.endswith("_tags"):
                 mkv.tags = file
+            elif ext == ".csv" and (file.stem.endswith("_ffmetrics") or file.stem.endswith("_metrics")):
+                mkv.metrics = file
             elif ext == ".zip" and file.stem.endswith("_metadata"):
                 mkv.attachments.append(MKV.Attachment(name="metadata.zip", mimetype="application/zip", description="Source metadata archive", path=file))
             else:
@@ -1240,17 +1366,23 @@ def main():
             print(f"Processing: {Path(stem).name}")
             print(f'{CMD_INDENT}container   : "{group.container}"')
             print(f'{CMD_INDENT}tags        : "{group.tags}"')
+            print(f'{CMD_INDENT}metrics     : {f""""{group.metrics}" """ if group.metrics is not None else ""}')
             print(f"""{CMD_INDENT}attachments : {"; ".join([f'"{attachment.path}"' for attachment in group.attachments])}""")
             #read tags that already exist in MKV file and discard generic Matroska tags
             metadata_mkv = metadata_decode_mkvxml_stdout(group.container)
-            metadata_old = {}
+            metadata_existing = {}
             for tag, value in metadata_mkv.items():
                 if not tag.isupper() and isinstance(value, dict):
-                    metadata_old[tag] = value
+                    metadata_existing[tag] = value
             #read tags that exist in XML file
             metadata_new = metadata_decode_mkvxml_file(group.tags)
+            #make tags from metrics data
+            metadata_metrics = {}
+            if group.metrics is not None:
+                metadata_metrics["FFMetrics"] = metadata_decode_ffmetrics_file(group.metrics, group.container)
+                metadata_metrics = tags_build(metadata_metrics)
             #merge metadata
-            metadata = metadata_old | metadata_new
+            metadata = metadata_existing | metadata_new | metadata_metrics
             #save it to new temporary XML file
             metadata_file = group.tags.with_suffix(".tmp")
             metadata_save({metadata_file: metadata_encode_mkvxml(metadata)}, None)

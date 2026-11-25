@@ -102,7 +102,7 @@ Extraction mode:
 - Tag dictionary is saved into XML file.
 
 Insertion mode:
-- User drops final MKV file(s) along with XML tag file(s) and any attachment files onto the script.
+- User drops final MKV file(s) along with XML tag file(s), [FFMetrics](https://github.com/fifonik/FFMetrics) results file(s) and any other attachment file(s) onto the script.
 - Input files are grouped by first 8 characters in their filenames (parent directory must match too).
-- For each group container, tags and attachment files are determined by their extensions and suffixes.
+- For each group container, tags, metrics and attachment files are determined by their extensions and suffixes.
 - Tags and attachments are inserted into container using *mkvpropedit* from *MKVToolNix*.
